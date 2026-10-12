@@ -30,6 +30,15 @@ func SetVideoRouter(router *gin.Engine) {
 		videoV1Router.POST("/videos", controller.RelayTask)
 		videoV1Router.GET("/videos/:task_id", controller.RelayTaskFetch)
 	}
+	// ClawHorse task-style media keeps nonstandard reference fields intact and
+	// uses the gateway's task ledger for pre-charge, ownership, and refunds.
+	videoV1Router.POST("/clawhorse/tasks/:kind", func(c *gin.Context) {
+		c.Set("platform", "clawhorse-apib")
+		controller.RelayTask(c)
+	})
+	videoV1Router.GET("/clawhorse/tasks/:task_id", controller.RelayTaskFetch)
+	// Internal recovery reads retain owner scoping when workflow-api restarts.
+	router.GET("/internal/clawhorse/tasks/:task_id", controller.ClawHorseInternalTaskStatus)
 
 	klingV1Router := router.Group("/kling/v1")
 	klingV1Router.Use(middleware.RouteTag("relay"))

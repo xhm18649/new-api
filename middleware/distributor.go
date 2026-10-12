@@ -293,6 +293,27 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 		}
 		c.Set("platform", string(constant.TaskPlatformSuno))
 		c.Set("relay_mode", relayMode)
+	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/clawhorse/tasks/") {
+		if c.Request.Method == http.MethodGet {
+			shouldSelectChannel = false
+			modelRequest.Model = getTaskOriginModelName(c)
+			c.Set("relay_mode", relayconstant.RelayModeVideoFetchByID)
+		} else {
+			if strings.HasPrefix(c.GetHeader("Content-Type"), "multipart/form-data") {
+				form, parseErr := common.ParseMultipartFormReusable(c)
+				if parseErr != nil {
+					return nil, false, parseErr
+				}
+				modelRequest.Model = strings.TrimSpace(strings.Join(form.Value["model"], ""))
+			} else {
+				req, parseErr := getModelFromRequest(c)
+				if parseErr != nil {
+					return nil, false, parseErr
+				}
+				modelRequest.Model = req.Model
+			}
+			c.Set("relay_mode", relayconstant.RelayModeVideoSubmit)
+		}
 	} else if strings.Contains(c.Request.URL.Path, "/v1/videos/") && strings.HasSuffix(c.Request.URL.Path, "/remix") {
 		relayMode := relayconstant.RelayModeVideoSubmit
 		c.Set("relay_mode", relayMode)
@@ -436,6 +457,13 @@ func getTaskOriginModelName(c *gin.Context) string {
 
 	userId := c.GetInt("id")
 	if task, exist, err := model.GetByTaskId(userId, taskId); err == nil && exist && task != nil {
+		if strings.HasPrefix(c.Request.URL.Path, "/v1/clawhorse/tasks/") {
+			name := strings.TrimPrefix(task.Properties.OriginModelName, "aux/")
+			for _, tier := range []string{"-480p", "-720p", "-768p", "-1080p"} {
+				name = strings.TrimSuffix(name, tier)
+			}
+			return name
+		}
 		return task.Properties.OriginModelName
 	}
 	return ""
