@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -253,6 +254,17 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
+	// A few compatible upstreams incorrectly return an HTTP 200 chat completion whose
+	// assistant content is an error envelope. Treat only explicit transient envelopes as
+	// an upstream failure. This lets the controller select another channel using the
+	// same user token and its normal per-attempt billing/audit path; ordinary JSON
+	// answers (including an assistant merely discussing an error) are left untouched.
+	for _, choice := range simpleResponse.Choices {
+		if upstreamErr := semanticUpstreamFailure(choice.Message.StringContent()); upstreamErr != nil {
+			return nil, upstreamErr
+		}
+	}
+
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "openai_finish_reason=content_filter")
@@ -334,4 +346,43 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	return &simpleResponse.Usage, nil
+}
+
+// semanticUpstreamFailure recognises only a complete JSON error object returned as
+// assistant content. It deliberately does not retry malformed plans or arbitrary
+// prose, because those may already be a billable model completion rather than a
+// transport/provider failure.
+func semanticUpstreamFailure(content string) *types.NewAPIError {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "{") {
+		return nil
+	}
+	var envelope struct {
+		Error struct {
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(content), &envelope); err != nil || envelope.Error.Message == "" {
+		return nil
+	}
+	classification := strings.ToLower(strings.TrimSpace(envelope.Error.Type + " " + fmt.Sprint(envelope.Error.Code)))
+	transientMarkers := []string{
+		"overload", "overloaded", "rate limit", "too many requests", "server busy",
+		"service unavailable", "temporarily unavailable", "upstream unavailable",
+		"gateway timeout", "timed out", "服务过载", "上游过载", "限流", "服务繁忙", "暂不可用", "超时", "server_error",
+	}
+	for _, marker := range transientMarkers {
+		// Inspect the structured classification, never only the free-form message:
+		// a model is allowed to explain an outage in a normal JSON answer.
+		if strings.Contains(classification, marker) {
+			return types.NewOpenAIError(
+				fmt.Errorf("upstream returned a transient error envelope: %s", envelope.Error.Message),
+				types.ErrorCode("upstream_transient_envelope"),
+				http.StatusServiceUnavailable,
+			)
+		}
+	}
+	return nil
 }
