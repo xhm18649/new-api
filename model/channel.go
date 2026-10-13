@@ -168,7 +168,24 @@ func (c ChannelInfo) Value() (driver.Value, error) {
 
 // Scan implements sql.Scanner interface
 func (c *ChannelInfo) Scan(value interface{}) error {
-	bytesValue, _ := value.([]byte)
+	var bytesValue []byte
+	switch typed := value.(type) {
+	case nil:
+		*c = ChannelInfo{}
+		return nil
+	case []byte:
+		bytesValue = typed
+	case string:
+		// SQLite may expose a JSON/TEXT column as string while MySQL and
+		// PostgreSQL normally return []byte. Treat both representations equally.
+		bytesValue = []byte(typed)
+	default:
+		return fmt.Errorf("unsupported channel_info value type %T", value)
+	}
+	if trimmed := strings.TrimSpace(string(bytesValue)); trimmed == "" || trimmed == "null" {
+		*c = ChannelInfo{}
+		return nil
+	}
 	return common.Unmarshal(bytesValue, c)
 }
 
